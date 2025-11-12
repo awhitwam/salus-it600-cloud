@@ -138,6 +138,7 @@ class SalusCloudGateway:
         self._aws_secret_key: str | None = None
         self._aws_session_token: str | None = None
         self._aws_identity_id: str | None = None
+        self._aws_credentials_expiry: datetime | None = None
 
         # MQTT client
         self._mqtt_client: mqtt.Client | None = None
@@ -273,6 +274,17 @@ class SalusCloudGateway:
                 self._aws_access_key = credentials["AccessKeyId"]
                 self._aws_secret_key = credentials["SecretKey"]
                 self._aws_session_token = credentials["SessionToken"]
+
+                # Parse expiration timestamp from AWS response
+                # AWS returns expiration as Unix timestamp (seconds since epoch)
+                expiration_timestamp = credentials.get("Expiration")
+                if expiration_timestamp:
+                    self._aws_credentials_expiry = datetime.fromtimestamp(expiration_timestamp, tz=timezone.utc)
+                    _LOGGER.debug("AWS IoT credentials expire at: %s", self._aws_credentials_expiry)
+                else:
+                    # Fallback: assume 1 hour expiration if not provided
+                    self._aws_credentials_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+                    _LOGGER.debug("AWS IoT credentials expiration not provided, assuming 1 hour")
 
                 _LOGGER.debug("Successfully obtained AWS IoT credentials")
 
@@ -498,17 +510,43 @@ class SalusCloudGateway:
 
     async def _ensure_mqtt_connected(self) -> None:
         """Ensure MQTT client is connected to AWS IoT."""
-        if self._mqtt_connected and self._mqtt_client:
+        # Check if AWS IoT credentials need refresh (expired or expiring within 5 minutes)
+        credentials_need_refresh = (
+            not self._aws_access_key
+            or not self._aws_credentials_expiry
+            or datetime.now(timezone.utc) >= self._aws_credentials_expiry - timedelta(minutes=5)
+        )
+
+        if credentials_need_refresh:
+            if self._aws_access_key:
+                _LOGGER.debug("AWS IoT credentials expired or expiring soon, refreshing")
+                # Disconnect existing MQTT client if credentials are being refreshed
+                if self._mqtt_client and self._mqtt_connected:
+                    _LOGGER.debug("Disconnecting MQTT before refreshing credentials")
+                    try:
+                        self._mqtt_client.loop_stop()
+                        self._mqtt_client.disconnect()
+                    except Exception as err:
+                        _LOGGER.debug("Error disconnecting MQTT: %s", err)
+                    self._mqtt_connected = False
+                    self._mqtt_client = None
+            else:
+                _LOGGER.debug("Getting AWS IoT credentials first")
+
+            await self._get_aws_iot_credentials()
+
+        # Check both flag AND actual connection status
+        if self._mqtt_connected and self._mqtt_client and self._mqtt_client.is_connected():
             _LOGGER.debug("MQTT already connected, skipping")
             return
 
+        # If flag says connected but client isn't, reset the flag
+        if self._mqtt_connected and self._mqtt_client and not self._mqtt_client.is_connected():
+            _LOGGER.warning("MQTT flag says connected but client is disconnected, resetting")
+            self._mqtt_connected = False
+
         try:
             _LOGGER.debug("Starting MQTT connection to AWS IoT")
-
-            # Get AWS IoT credentials if we don't have them
-            if not self._aws_access_key:
-                _LOGGER.debug("Getting AWS IoT credentials first")
-                await self._get_aws_iot_credentials()
 
             _LOGGER.debug("Creating signed WebSocket URL...")
             # Create signed WebSocket URL
@@ -735,14 +773,29 @@ class SalusCloudGateway:
             def publish_sync():
                 if not self._mqtt_client:
                     raise SalusCloudConnectionError("MQTT client not initialized")
+                if not self._mqtt_client.is_connected():
+                    raise SalusCloudConnectionError("MQTT client is not currently connected")
                 result = self._mqtt_client.publish(topic, payload, qos=1)
                 result.wait_for_publish()
                 if result.rc != mqtt.MQTT_ERR_SUCCESS:
                     raise SalusCloudConnectionError(f"MQTT publish failed with code {result.rc}: {mqtt.error_string(result.rc)}")
 
-            await asyncio.to_thread(publish_sync)
+            try:
+                await asyncio.to_thread(publish_sync)
+                _LOGGER.debug("Successfully published shadow update for %s (index: %s)", device_code, device_index)
 
-            _LOGGER.debug("Successfully published shadow update for %s (index: %s)", device_code, device_index)
+            except SalusCloudConnectionError as err:
+                # If publish failed due to disconnection, try to reconnect and retry once
+                if "not currently connected" in str(err):
+                    _LOGGER.warning("MQTT disconnected during publish, reconnecting and retrying...")
+                    self._mqtt_connected = False
+                    await self._ensure_mqtt_connected()
+
+                    # Retry publish
+                    await asyncio.to_thread(publish_sync)
+                    _LOGGER.debug("Successfully published shadow update for %s (index: %s) after retry", device_code, device_index)
+                else:
+                    raise
 
         except Exception as err:
             _LOGGER.error("Failed to update device shadow: %s", err, exc_info=True)
@@ -833,14 +886,31 @@ class SalusCloudGateway:
 
             # Publish in a thread (paho-mqtt is synchronous)
             def publish_sync():
+                if not self._mqtt_client:
+                    raise SalusCloudConnectionError("MQTT client not initialized")
+                if not self._mqtt_client.is_connected():
+                    raise SalusCloudConnectionError("MQTT client is not currently connected")
                 result = self._mqtt_client.publish(topic, payload, qos=1)
                 result.wait_for_publish()
                 if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                    raise SalusCloudConnectionError(f"MQTT publish failed with code {result.rc}")
+                    raise SalusCloudConnectionError(f"MQTT publish failed with code {result.rc}: {mqtt.error_string(result.rc)}")
 
-            await asyncio.to_thread(publish_sync)
+            try:
+                await asyncio.to_thread(publish_sync)
+                _LOGGER.debug("Successfully published gateway shadow update for %s", gateway_code)
 
-            _LOGGER.debug("Successfully published gateway shadow update for %s", gateway_code)
+            except SalusCloudConnectionError as err:
+                # If publish failed due to disconnection, try to reconnect and retry once
+                if "not currently connected" in str(err):
+                    _LOGGER.warning("MQTT disconnected during publish, reconnecting and retrying...")
+                    self._mqtt_connected = False
+                    await self._ensure_mqtt_connected()
+
+                    # Retry publish
+                    await asyncio.to_thread(publish_sync)
+                    _LOGGER.debug("Successfully published gateway shadow update for %s after retry", gateway_code)
+                else:
+                    raise
 
         except Exception as err:
             _LOGGER.error("Failed to update gateway shadow: %s", err)
