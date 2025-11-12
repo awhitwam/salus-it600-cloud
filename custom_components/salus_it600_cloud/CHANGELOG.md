@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2025-11-12
+
+### Fixed
+- 🐛 **Critical: AWS IoT credentials expiration**
+  - Fixed issue where credentials expired after ~1 hour causing all control operations to fail
+  - Error symptoms: "WebSocket handshake error, connection not upgraded" and MQTT rc=7 (not authorized)
+  - Added `_aws_credentials_expiry` field to track credential expiration time
+  - Parse expiration timestamp from AWS GetCredentialsForIdentity response
+  - Automatically refresh credentials 5 minutes before expiration
+  - Disconnect and reconnect MQTT client when credentials are refreshed
+  - Improved error handling for MQTT disconnections during publish operations
+  - Added retry logic for publish operations after reconnection
+
+### Changed
+- AWS IoT credentials now automatically renewed before expiration
+- MQTT client properly disconnects before credential refresh
+- Better connection state management (check both flag and actual connection)
+
+### Technical Details
+- Credentials from Cognito Identity Pool expire after ~1 hour
+- `_ensure_mqtt_connected()` now checks expiration before every connection
+- Fallback expiration: 1 hour if timestamp not provided by AWS
+- This ensures uninterrupted device control functionality 24/7
+
 ## [1.0.2] - 2025-10-31
 
 ### Fixed
