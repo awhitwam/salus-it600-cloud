@@ -579,6 +579,7 @@ class SalusCloudGateway:
 
             # Create event for waiting on connection
             self._mqtt_connect_event = asyncio.Event()
+            self._event_loop = asyncio.get_running_loop()  # Store reference for thread-safe callbacks
             self._mqtt_connect_rc = None
 
             # Create MQTT client with WebSocket
@@ -605,9 +606,7 @@ class SalusCloudGateway:
                     self._mqtt_connected = False
                 # Signal that connection attempt is complete
                 if self._mqtt_connect_event:
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    loop.call_soon_threadsafe(self._mqtt_connect_event.set)
+                    self._event_loop.call_soon_threadsafe(self._mqtt_connect_event.set)
 
             def on_disconnect(client, userdata, rc):
                 _LOGGER.warning("MQTT disconnected (rc=%s): %s", rc, mqtt.connack_string(rc) if rc > 0 else "Clean disconnect")
