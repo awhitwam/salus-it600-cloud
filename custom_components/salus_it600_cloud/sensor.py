@@ -69,7 +69,7 @@ async def async_setup_entry(
 def _has_temperature(device_data: dict[str, Any]) -> bool:
     """Check if device has temperature sensor."""
     # For standalone temperature sensors (not thermostats)
-    device_type = device_data.get("type", "").lower()
+    device_type = (device_data.get("type") or "").lower()
     return (
         device_type == "temperature_sensor"
         or device_type == "sensor"
