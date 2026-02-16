@@ -404,7 +404,6 @@ class SalusCloudGateway:
         """Get all devices from all gateways with their current states."""
         devices = []
         device_codes = []
-        seen_device_codes: set[str] = set()  # Track already-added devices to avoid duplicates
 
         gateways = await self.get_gateways()
 
@@ -444,12 +443,6 @@ class SalusCloudGateway:
                         # Process as a device if it has a device_code
                         device_code = item.get("device_code")
                         if device_code:
-                            # Skip if we've already seen this device
-                            if device_code in seen_device_codes:
-                                _LOGGER.debug("Skipping duplicate device: %s", device_code)
-                                return
-                            seen_device_codes.add(device_code)
-
                             # Add gateway ID to each device
                             item["_gateway_id"] = gw_id
                             devices.append(item)
